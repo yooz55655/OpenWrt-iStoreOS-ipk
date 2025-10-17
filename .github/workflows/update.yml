@@ -29,15 +29,18 @@ jobs:
             echo "Processing directory: $dir"
             cd "$dir"
 
+            # 清空 Packages
             > Packages
 
             for ipk in *.ipk; do
               [ -f "$ipk" ] || continue
 
+              # 提取 control 文件
               ar x "$ipk" control.tar.gz
               tar xzf control.tar.gz ./control
               rm control.tar.gz
 
+              # 解析控制信息
               package_name=$(grep '^Package:' ./control | cut -d' ' -f2-)
               version=$(grep '^Version:' ./control | cut -d' ' -f2-)
               architecture=$(grep '^Architecture:' ./control | cut -d' ' -f2-)
@@ -46,11 +49,13 @@ jobs:
               maintainer=$(grep '^Maintainer:' ./control | cut -d' ' -f2- || echo "github_actions")
               installed_size=$(grep '^Installed-Size:' ./control | cut -d' ' -f2- || echo "0")
 
+              # 校验和与文件大小
               md5sum=$(md5sum "$ipk" | awk '{print $1}')
               sha256sum=$(sha256sum "$ipk" | awk '{print $1}')
               size=$(stat -c%s "$ipk")
 
-              cat << EOF >> Packages
+# 顶格写 EOF，修复 YAML EOF 报错
+cat <<EOF >> Packages
 Package: $package_name
 Version: $version
 Depends: $depends
@@ -70,7 +75,9 @@ EOF
               rm ./control
             done
 
+            # 压缩 Packages
             gzip -9c Packages > Packages.gz
+
             cd - > /dev/null
           done
 
