@@ -1,0 +1,36 @@
+姓名: 自动更新OpenWrt IPK索引
+
+在……之上:
+推:
+分支机构:
+      - 主要的
+路径:
+      - '**/*.ipk'
+
+工作:
+建立:
+run-on: ubuntu-最新
+
+步骤:
+      - 姓名: 签出存储库
+uses: 操作/结帐@v4
+
+      - 姓名: 安装ipkg-utils
+跑: sudo apt-get更新&&sudo apt-get安装-y ipkg-utils
+
+      - 姓名: 为每个目录生成包索引
+跑: |
+用于以$(查找)表示的dir. -type f-name"*.ipk"-exec目录名{}\；|sort-u)；do
+回声"正在处理$dir"
+CD"$dir"
+ipkg-make-index。>包
+gzip-9c包>Packages.gz
+CD->/dev/null
+已完成
+
+      - 姓名: 提交并推送更新的包
+uses: endbug/添加并提交@v9
+和……一起:
+添加: '**/Packages**/Packages.gz'
+消息: '自动更新所有体系结构的软件包索引'
+default_author: GitHub_action
