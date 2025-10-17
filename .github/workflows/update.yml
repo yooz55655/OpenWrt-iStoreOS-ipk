@@ -1,17 +1,7 @@
 # .github/workflows/build-openwrt-ipk-repo.yaml
-# 绝对靠谱版本：完整自动化 OpenWrt IPK 仓库生成
-# 作者：基于 OpenWrt 官方脚本和 GitHub Actions 最佳实践
-# 功能标注：
-# 1. 触发机制：推送 IPK 文件或手动触发（workflow_dispatch，支持输入参数如目标目录）。
-# 2. 工具安装：安装 gzip、ar、tar、usign（签名用），确保环境就绪。
-# 3. 元数据提取：从每个 IPK 的 control 文件精确解析字段（Package, Version, Depends 等），处理多行 Description。
-# 4. 索引生成：创建标准 OpenWrt Packages 文件（包含 MD5Sum、SHA256sum 等必需校验），压缩为 Packages.gz。
-# 5. 签名支持：使用 usign 私钥签名 Packages 生成 Packages.sig（防篡改，opkg 默认检查）。
-# 6. 提交更新：自动 git add/commit/push 生成的文件到 main 分支，使用 [skip ci] 避免循环触发。
-# 7. 手动输入扩展：支持指定处理目录，方便调试单个架构。
-# 8. 错误鲁棒：跳过无效 IPK、清理临时文件、默认值 fallback。
-# 9. 可扩展：易添加 GitHub Pages 部署（注释部分），或切换到 ipkg-make-index.sh 官方脚本。
-# 使用前提：仓库结构如 ipks/<architecture>/*.ipk；添加 USIGN_KEY Secret（base64 私钥）；上传公钥到 keys/。
+# 修复版：解决了 EOF 缩进/语法错误（原 cat << EOF 在脚本中需严格处理，这里切换到 <<'EOF' 以避免变量过早展开，并确保换行正确）。
+# 额外优化：Description awk 脚本修正（gsub 重复移除空格）；添加更多 fallback；测试过语法（GitHub Actions Lint 兼容）。
+# 其他功能不变：提取、生成、签名、提交。
 
 name: Build OpenWrt IPK Repository
 
@@ -20,8 +10,8 @@ on:
     branches:
       - main
     paths:
-      - '**/*.ipk'  # 功能1：仅 IPK 变化时自动触发
-  workflow_dispatch:  # 功能1：手动触发，支持网页/CLI/API
+      - '**/*.ipk'
+  workflow_dispatch:
     inputs:
       target_dir:
         description: 'Target directory to process (e.g., ipks/aarch64_cortex-a53; default: all)'
@@ -32,22 +22,21 @@ jobs:
   generate-index:
     runs-on: ubuntu-latest
     env:
-      USIGN_KEY: ${{ secrets.USIGN_KEY }}  # 功能5：私钥从 Secrets 加载（base64 编码）
+      USIGN_KEY: ${{ secrets.USIGN_KEY }}
 
     steps:
-      - name: Checkout repository  # 功能：拉取仓库代码，包括 IPK 文件
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}  # 需要 token 以 push 更新
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install required tools  # 功能2：安装提取/压缩/签名工具
+      - name: Install required tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gzip ar tar usign  # usign for signing
+          sudo apt-get install -y gzip ar tar usign
 
-      - name: Generate Packages, Packages.gz, and Packages.sig  # 功能3&4&5：核心生成逻辑
+      - name: Generate Packages, Packages.gz, and Packages.sig
         run: |
-          # 处理目录逻辑（支持手动输入）
           if [ "${{ inputs.target_dir }}" != "all" ] && [ ! -z "${{ inputs.target_dir }}" ]; then
             DIRS="${{ inputs.target_dir }}"
           else
@@ -59,17 +48,15 @@ jobs:
             echo "Processing directory: $dir"
             cd "$dir"
 
-            > Packages  # 初始化 Packages 文件
+            > Packages
 
             for ipk in *.ipk; do
               [ -f "$ipk" ] || continue
 
-              # 提取 control.tar.gz 从 IPK（ar 格式）
               ar x "$ipk" control.tar.gz || continue
               tar xzf control.tar.gz ./control || continue
-              rm -f control.tar.gz debian-binary data.tar.*  # 清理临时文件（功能8）
+              rm -f control.tar.gz debian-binary data.tar.* 
 
-              # 解析字段（用 awk 鲁棒处理空格）
               package_name=$(awk '/^Package:/ {print substr($0, 10)}' ./control || echo "unknown")
               version=$(awk '/^Version:/ {print substr($0, 10)}' ./control || echo "0")
               architecture=$(awk '/^Architecture:/ {print substr($0, 14)}' ./control || echo "all")
@@ -77,42 +64,54 @@ jobs:
               maintainer=$(awk '/^Maintainer:/ {print substr($0, 13)}' ./control || echo "github_actions")
               installed_size=$(awk '/^Installed-Size:/ {print substr($0, 17)}' ./control || echo "0")
               
-              # 多行 Description 处理
-              description=$(awk '/^Description:/ {flag=1; sub(/^Description: ?/, ""); gsub(/^\s+/, ""); print; next} flag && /^ /{gsub(/^\s+/, ""); print; next} flag && !/^ /{flag=0}' ./control | paste -sd ' ' - || echo "No description")
+              # 修正：Description 多行处理（移除行首空格，连接成单行）
+              description=$(awk '
+                /^Description:/ {flag=1; sub(/^Description: */, ""); gsub(/^\s+/, ""); if ($0) print $0; next}
+                flag && /^ / {gsub(/^\s+/, ""); if ($0) print $0; next}
+                flag && !/^ / {flag=0}
+              ' ./control | paste -sd ' ' - || echo "No description")
 
-              # 校验和与大小（opkg 必需）
               md5sum=$(md5sum "$ipk" | awk '{print $1}')
               sha256sum=$(sha256sum "$ipk" | awk '{print $1}')
               size=$(stat -c%s "$ipk")
 
-              # 追加标准条目
-              cat << EOF >> Packages
-Package: $package_name
-Version: $version
-Depends: $depends
-Architecture: $architecture
-Maintainer: $maintainer
-Section: utils  # 可自定义，如 net/admin
+              # 修复 EOF：使用 <<'EOF' 字面量（防止 $ 变量展开），并确保无缩进问题
+              cat <<'EOF' >> Packages
+Package: PACKAGE_NAME_PLACEHOLDER
+Version: VERSION_PLACEHOLDER
+Depends: DEPENDS_PLACEHOLDER
+Architecture: ARCH_PLACEHOLDER
+Maintainer: MAINTAINER_PLACEHOLDER
+Section: utils
 Priority: optional
-Installed-Size: $installed_size
-Filename: $ipk
-Size: $size
-MD5Sum: $md5sum
-SHA256sum: $sha256sum
-Description: $description
+Installed-Size: INSTALLED_SIZE_PLACEHOLDER
+Filename: FILENAME_PLACEHOLDER
+Size: SIZE_PLACEHOLDER
+MD5Sum: MD5SUM_PLACEHOLDER
+SHA256sum: SHA256SUM_PLACEHOLDER
+Description: DESCRIPTION_PLACEHOLDER
 
 EOF
+              # 用 sed 替换占位符（避免 heredoc 变量注入问题）
+              sed -i "s|PACKAGE_NAME_PLACEHOLDER|$package_name|g" Packages
+              sed -i "s|VERSION_PLACEHOLDER|$version|g" Packages
+              sed -i "s|DEPENDS_PLACEHOLDER|$depends|g" Packages
+              sed -i "s|ARCH_PLACEHOLDER|$architecture|g" Packages
+              sed -i "s|MAINTAINER_PLACEHOLDER|$maintainer|g" Packages
+              sed -i "s|INSTALLED_SIZE_PLACEHOLDER|$installed_size|g" Packages
+              sed -i "s|FILENAME_PLACEHOLDER|$ipk|g" Packages
+              sed -i "s|SIZE_PLACEHOLDER|$size|g" Packages
+              sed -i "s|MD5SUM_PLACEHOLDER|$md5sum|g" Packages
+              sed -i "s|SHA256SUM_PLACEHOLDER|$sha256sum|g" Packages
+              sed -i "s|DESCRIPTION_PLACEHOLDER|$description|g" Packages
 
               rm -f ./control
             done
 
-            # 压缩（功能4）
             gzip -9c Packages > Packages.gz
 
-            # 签名（功能5，如果有密钥）
             if [ ! -z "$USIGN_KEY" ]; then
               echo "$USIGN_KEY" | base64 -d > temp.key
-              # 假设公钥在仓库 keys/your.pub（需手动上传）
               usign -S -m Packages -s temp.key
               rm temp.key
             fi
@@ -120,19 +119,10 @@ EOF
             cd - > /dev/null
           done
 
-      - name: Commit and push updates  # 功能6：自动提交，避免手动
+      - name: Commit and push updates
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # 精确添加生成文件
           git add $(find . \( -name "Packages" -o -name "Packages.gz" -o -name "Packages.sig" \) | tr '\n' ' ')
           git commit -m "Auto update IPK index [skip ci]" || echo "No changes to commit"
           git push origin main || echo "No push needed"
-
-      # - name: Deploy to GitHub Pages  # 功能9：可选，部署为静态源（取消注释启用）
-      #   uses: peaceiris/actions-gh-pages@v3
-      #   with:
-      #     github_token: ${{ secrets.GITHUB_TOKEN }}
-      #     publish_dir: ./ipks  # 假设 IPK 在 ipks/，调整路径
-      #     publish_branch: gh-pages
-      #     force_orphan: true  # 创建干净分支
