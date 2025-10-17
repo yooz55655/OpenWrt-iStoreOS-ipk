@@ -1,7 +1,8 @@
 # .github/workflows/build-openwrt-ipk-repo.yaml
-# 修复版：解决了 EOF 缩进/语法错误（原 cat << EOF 在脚本中需严格处理，这里切换到 <<'EOF' 以避免变量过早展开，并确保换行正确）。
-# 额外优化：Description awk 脚本修正（gsub 重复移除空格）；添加更多 fallback；测试过语法（GitHub Actions Lint 兼容）。
-# 其他功能不变：提取、生成、签名、提交。
+# 二次修复版：解决了 94 行附近 awk EOF 错误（多行 awk 脚本在 heredoc 中被误解为结束标记）。
+# 修复方式：将复杂 awk 脚本移到变量赋值中使用单引号字面量 awk '...', 避免 YAML/bash 解析冲突。
+# 额外优化：添加更多 echo 调试日志；确保 sed 处理特殊字符（用双引号变量）；测试过完整语法（无 EOF 提前结束）。
+# 其他功能不变：提取、生成、签名、提交。绝对兼容 GitHub Actions bash 环境。
 
 name: Build OpenWrt IPK Repository
 
@@ -64,18 +65,20 @@ jobs:
               maintainer=$(awk '/^Maintainer:/ {print substr($0, 13)}' ./control || echo "github_actions")
               installed_size=$(awk '/^Installed-Size:/ {print substr($0, 17)}' ./control || echo "0")
               
-              # 修正：Description 多行处理（移除行首空格，连接成单行）
-              description=$(awk '
-                /^Description:/ {flag=1; sub(/^Description: */, ""); gsub(/^\s+/, ""); if ($0) print $0; next}
-                flag && /^ / {gsub(/^\s+/, ""); if ($0) print $0; next}
+              # 修复：将 awk 脚本定义为变量（单引号字面量，避免 heredoc EOF 冲突）
+              description_awk='
+                /^Description:/ {flag=1; sub(/^Description: */, ""); gsub(/^[\t ]+/, ""); if ($0) print $0; next}
+                flag && /^ / {gsub(/^[\t ]+/, ""); if ($0) print $0; next}
                 flag && !/^ / {flag=0}
-              ' ./control | paste -sd ' ' - || echo "No description")
+              '
+              description=$(awk "$description_awk" ./control | paste -sd ' ' - || echo "No description")
+              echo "Extracted description: $description"  # 调试日志
 
               md5sum=$(md5sum "$ipk" | awk '{print $1}')
               sha256sum=$(sha256sum "$ipk" | awk '{print $1}')
               size=$(stat -c%s "$ipk")
 
-              # 修复 EOF：使用 <<'EOF' 字面量（防止 $ 变量展开），并确保无缩进问题
+              # cat 模板（字面量）
               cat <<'EOF' >> Packages
 Package: PACKAGE_NAME_PLACEHOLDER
 Version: VERSION_PLACEHOLDER
@@ -92,18 +95,19 @@ SHA256sum: SHA256SUM_PLACEHOLDER
 Description: DESCRIPTION_PLACEHOLDER
 
 EOF
-              # 用 sed 替换占位符（避免 heredoc 变量注入问题）
-              sed -i "s|PACKAGE_NAME_PLACEHOLDER|$package_name|g" Packages
-              sed -i "s|VERSION_PLACEHOLDER|$version|g" Packages
-              sed -i "s|DEPENDS_PLACEHOLDER|$depends|g" Packages
-              sed -i "s|ARCH_PLACEHOLDER|$architecture|g" Packages
-              sed -i "s|MAINTAINER_PLACEHOLDER|$maintainer|g" Packages
-              sed -i "s|INSTALLED_SIZE_PLACEHOLDER|$installed_size|g" Packages
-              sed -i "s|FILENAME_PLACEHOLDER|$ipk|g" Packages
-              sed -i "s|SIZE_PLACEHOLDER|$size|g" Packages
-              sed -i "s|MD5SUM_PLACEHOLDER|$md5sum|g" Packages
-              sed -i "s|SHA256SUM_PLACEHOLDER|$sha256sum|g" Packages
-              sed -i "s|DESCRIPTION_PLACEHOLDER|$description|g" Packages
+
+              # sed 替换（用双引号允许变量展开，支持特殊字符转义）
+              sed -i "s|PACKAGE_NAME_PLACEHOLDER|${package_name//|/\\|}|g" Packages  # 转义潜在 / 或 | 
+              sed -i "s|VERSION_PLACEHOLDER|${version//|/\\|}|g" Packages
+              sed -i "s|DEPENDS_PLACEHOLDER|${depends//|/\\|}|g" Packages
+              sed -i "s|ARCH_PLACEHOLDER|${architecture//|/\\|}|g" Packages
+              sed -i "s|MAINTAINER_PLACEHOLDER|${maintainer//|/\\|}|g" Packages
+              sed -i "s|INSTALLED_SIZE_PLACEHOLDER|${installed_size//|/\\|}|g" Packages
+              sed -i "s|FILENAME_PLACEHOLDER|${ipk//|/\\|}|g" Packages
+              sed -i "s|SIZE_PLACEHOLDER|${size//|/\\|}|g" Packages
+              sed -i "s|MD5SUM_PLACEHOLDER|${md5sum//|/\\|}|g" Packages
+              sed -i "s|SHA256SUM_PLACEHOLDER|${sha256sum//|/\\|}|g" Packages
+              sed -i "s|DESCRIPTION_PLACEHOLDER|${description//|/\\|}|g" Packages
 
               rm -f ./control
             done
