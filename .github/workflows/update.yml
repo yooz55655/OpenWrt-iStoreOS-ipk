@@ -6,32 +6,87 @@ on:
       - main
     paths:
       - '**/*.ipk'
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
-  build:
+  generate-packages:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install ipkg-utils
-        run: sudo apt-get update && sudo apt-get install -y ipkg-utils
-
-      - name: Generate Packages index
+      - name: Install required tools
         run: |
-          # Find all directories containing IPK files
+          sudo apt-get update
+          sudo apt-get install -y gzip ar tar
+
+      - name: Generate Packages and Packages.gz
+        run: |
+          # 遍历所有包含 IPK 的目录
           for dir in $(find . -type f -name "*.ipk" -exec dirname {} \; | sort -u); do
-            echo "Processing $dir"
+            echo "Processing directory: $dir"
             cd "$dir"
-            ipkg-make-index . > Packages
+
+            # 清空 Packages
+            > Packages
+
+            # 处理每个 IPK
+            for ipk in *.ipk; do
+              [ -f "$ipk" ] || continue
+
+              # 提取 control 文件
+              ar x "$ipk" control.tar.gz
+              tar xzf control.tar.gz ./control
+              rm control.tar.gz
+
+              # 解析 control 文件
+              package_name=$(grep '^Package:' ./control | cut -d' ' -f2-)
+              version=$(grep '^Version:' ./control | cut -d' ' -f2-)
+              architecture=$(grep '^Architecture:' ./control | cut -d' ' -f2-)
+              depends=$(grep '^Depends:' ./control | cut -d' ' -f2-)
+              description=$(grep '^Description:' ./control | cut -d' ' -f2- || echo "No description")
+              maintainer=$(grep '^Maintainer:' ./control | cut -d' ' -f2- || echo "github_actions")
+              installed_size=$(grep '^Installed-Size:' ./control | cut -d' ' -f2- || echo "0")
+
+              # 校验和与大小
+              md5sum=$(md5sum "$ipk" | awk '{print $1}')
+              sha256sum=$(sha256sum "$ipk" | awk '{print $1}')
+              size=$(stat -c%s "$ipk")
+
+              # 追加到 Packages
+              cat << EOF >> Packages
+Package: $package_name
+Version: $version
+Depends: $depends
+Architecture: $architecture
+Maintainer: $maintainer
+Section: utils
+Priority: optional
+Installed-Size: $installed_size
+Filename: $ipk
+Size: $size
+MD5Sum: $md5sum
+SHA256sum: $sha256sum
+Description: $description
+
+EOF
+
+              rm ./control
+            done
+
+            # 压缩
             gzip -9c Packages > Packages.gz
+
             cd - > /dev/null
           done
 
       - name: Commit and push updated Packages
-        uses: EndBug/add-and-commit@v9
-        with:
-          add: '**/Packages **/Packages.gz'
-          message: 'Auto update Packages index for all architectures'
-          default_author: github_actions
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add $(find . -name "Packages*" )
+          git commit -m "Auto update Packages index [skip ci]" || echo "No changes"
+          git push || echo "No push needed"
